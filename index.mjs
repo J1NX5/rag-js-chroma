@@ -1,53 +1,49 @@
-// index.mjs
 import { ChromaClient } from "chromadb";
 import { pipeline } from "@xenova/transformers";
 
-// 1) Chroma-HTTP-Client (zeigt auf deinen lokalen Chroma-Server)
-const chroma = new ChromaClient({ path: "http://localhost:8000" });
+// Chroma-Client: v2-Server, host/port (kein "path")
+const chroma = new ChromaClient({ host: "localhost", port: 8000 });
 
-// 2) Embedding-Pipeline (läuft lokal, kein API-Key nötig)
-//   Modell wird beim ersten Lauf heruntergeladen & gecached.
+// Embedding-Modell lokal (wird beim ersten Lauf gecached)
 const embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
 
-// Helfer: Mittelwert-Pooling + L2-Normalisierung
+// Hilfsfunktionen: mean pooling + L2-Normalisierung
 const l2 = v => Math.hypot(...v);
-const normalize = v => { const n = l2(v); return n === 0 ? v : v.map(x => x / n); };
-async function embedding(text) {
+const norm = v => { const n = l2(v); return n ? v.map(x => x / n) : v; };
+async function embedOne(text) {
   const out = await embedder(text, { pooling: "mean", normalize: false });
-  return normalize(Array.from(out.data)); // -> number[]
+  return norm(Array.from(out.data));           // number[]
 }
 
-async function main() {
-  // 3) Collection erstellen/holen
-  const collection = await chroma.getOrCreateCollection({ name: "docs" });
+// Eigene EmbeddingFunction → vermeidet @chroma-core/default-embed
+const embeddingFunction = { generate: async (texts) => Promise.all(texts.map(embedOne)) };
 
-  // 4) Deine Daten (Beispiel)
-  const docs = [
-    "Unser Rückgaberecht beträgt 30 Tage.",
-    "Rückgaben nach 30 Tagen sind nur mit Kaufbeleg möglich.",
-    "Kontakt: support@firma.de",
-    "Defekte Ware wird innerhalb der ersten 14 Tage kostenlos ersetzt."
-  ];
+const collection = await chroma.getOrCreateCollection({
+  name: "docs-demo",                            // nimm gerne einen neuen Namen
+  embeddingFunction
+});
 
-  // 5) Embeddings berechnen und hinzufügen
-  const ids = docs.map((_, i) => `doc-${i}`);
-  const vectors = [];
-  for (const d of docs) vectors.push(await embedding(d));
+// Testdaten (du kannst hier alles reinkippen)
+const docs = [
+  "Unser Rückgaberecht beträgt 30 Tage.",
+  "Rückgaben nach 30 Tagen sind nur mit Kaufbeleg möglich.",
+  "Kontakt: support@firma.de",
+  "Defekte Ware wird innerhalb der ersten 14 Tage kostenlos ersetzt."
+];
+const ids = docs.map((_, i) => `doc-${i}`);
 
-  await collection.add({
-    ids,
-    documents: docs,
-    embeddings: vectors,
-    metadatas: docs.map((_, i) => ({ src: "policy.md", idx: i }))
-  });
+// Einfügen (Embeddings erzeugt Chroma via embeddingFunction „on the fly“)
+await collection.add({
+  ids,
+  documents: docs,
+  metadatas: docs.map((_, i) => ({ src: "policy.md", i }))
+});
+console.log(`✅ ${docs.length} Einträge gespeichert.`);
 
-  console.log(`✅ ${docs.length} Einträge in Chroma gespeichert.`);
-  
-  // (Optional) eine erste Abfrage, nur um zu prüfen, dass’s steckt:
-  const q = "Wie lange gilt das Rückgaberecht?";
-  const qVec = await embedding(q);
-  const res = await collection.query({ queryEmbeddings: [qVec], nResults: 3 });
-  console.log("🔎 Treffer:", res.documents?.[0]);
-}
-
-main().catch(err => console.error(err));
+// Erste semantische Suche
+const question = "Wie lange gilt das Rückgaberecht?";
+const res = await collection.query({
+  queryTexts: [question],   // wichtig: queryTexts (nicht queryEmbeddings), da wir EF gesetzt haben
+  nResults: 3
+});
+console.log("🔎 Treffer:", res.documents?.[0]);
